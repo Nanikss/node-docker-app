@@ -1,0 +1,14 @@
+#!/bin/bash
+# First boot: install Docker and start the service. Rendered by Terraform templatefile().
+set -euo pipefail
+
+dnf install -y docker
+systemctl enable --now docker
+usermod -aG docker ec2-user
+
+docker run -d \
+  --name node-docker-app \
+  --restart unless-stopped \
+  -p 80:3000 \
+  --log-opt max-size=10m --log-opt max-file=3 \
+  "${image}"

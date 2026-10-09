@@ -1,0 +1,6 @@
+# Copy to terraform.tfvars and adjust.
+region        = "ap-south-1"
+instance_type = "t3.micro"
+ssh_cidr      = "203.0.113.10/32"
+key_name      = "node-docker-app"
+image         = "ghcr.io/nanikss/node-docker-app:latest"

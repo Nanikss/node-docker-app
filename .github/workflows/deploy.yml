@@ -1,30 +1,70 @@
-name: Deploy to EC2
+name: Deploy
 
+# Manual only: a person picks the tag. Pushes to master build and publish an
+# image (ci.yml) but never touch the server.
 on:
-  push:
-    branches:
-      - master
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Image tag to deploy (short commit SHA from CI, or "latest")
+        required: true
+        default: latest
+      rollback:
+        description: Ignore image_tag and roll back to the previously deployed image
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
+    environment: production
+    env:
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+      EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+      IMAGE_TAG: ${{ inputs.image_tag }}
+      ROLLBACK: ${{ inputs.rollback }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Set up SSH key
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.EC2_SSH_KEY }}
-
-      - name: Deploy over SSH
+      - name: Check deploy secrets
+        id: check
         run: |
-          ssh -o StrictHostKeyChecking=no ec2-user@13.203.230.174 << 'EOF'
-            cd node-docker-app
-            git pull origin master
-            docker stop mynodeapp || true
-            docker rm mynodeapp || true
-            docker build -t node-docker-app .
-            docker run -d -p 80:80 --name mynodeapp node-docker-app
-          EOF
+          if [ -z "$EC2_HOST" ] || [ -z "$EC2_SSH_KEY" ]; then
+            echo "::notice title=Deploy skipped::Set the EC2_HOST and EC2_SSH_KEY secrets (see README, Deploy) to enable deploys."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.check.outputs.configured == 'true'
+
+      - name: Configure SSH
+        if: steps.check.outputs.configured == 'true'
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Copy and run deploy script
+        if: steps.check.outputs.configured == 'true'
+        run: |
+          image_repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/node-docker-app"
+          if [ "$ROLLBACK" = "true" ]; then
+            arg="--rollback"
+          elif [[ "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            arg="$IMAGE_TAG"
+          else
+            echo "::error::invalid image tag: $IMAGE_TAG"
+            exit 1
+          fi
+          ssh_opts=(-i ~/.ssh/deploy_key -o BatchMode=yes)
+          scp "${ssh_opts[@]}" scripts/deploy.sh "ec2-user@$EC2_HOST:/tmp/deploy.sh"
+          ssh "${ssh_opts[@]}" "ec2-user@$EC2_HOST" "IMAGE_REPO='$image_repo' bash /tmp/deploy.sh '$arg'"
+          echo "Deployed \`${arg}\` to $EC2_HOST" >> "$GITHUB_STEP_SUMMARY"
